@@ -1,13 +1,23 @@
-from langchain.utilities import SQLDatabase
+from langchain_community.utilities import SQLDatabase
 from langchain.utilities.sql_database import truncate_word
 from langchain.tools.sql_database.tool import QuerySQLDataBaseTool
 import tiktoken
+from decouple import config
 from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd 
 from typing import List, Union, Literal
 import random, string, os
-from .prompts import query_and_save_tool_description
+from .prompts import query_and_save_tool_description, retriever_tool_description
 import tiktoken, time
+
+
+
+os.environ["OPENAI_API_TYPE"] = config("OPENAI_API_TYPE")
+os.environ["AZURE_OPENAI_ENDPOINT"] = config("AZURE_OPENAI_ENDPOINT")
+os.environ["OPENAI_API_VERSION"] = config("OPENAI_API_VERSION")
+os.environ["AZURE_OPENAI_API_KEY"] = config("AZURE_OPENAI_API_KEY")
+
+
 
 # these 3 functions below are temporary solutions for recording tokens used
 def get_token_record():
@@ -61,14 +71,20 @@ def count_tokens(input, agent_step=None):
 
 
 class CustomSQLDatabase(SQLDatabase):
+    _instance = None
 
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(CustomSQLDatabase, cls).__new__(cls)
+        return cls._instance
+    
     def run_and_save(
         self,
         command: str,
         message_id: str, 
         fetch = "all",
     ) -> str:
-        """Execute a SQL command, save the result and return a string representing the results and stored_id.
+        """Execute a SQL command, save the result and return a string representing the results and stored_file_id.
 
         If the statement returns rows, a string of the results is returned.
         If the statement returns no rows, an empty string is returned.
@@ -93,12 +109,8 @@ class CustomSQLDatabase(SQLDatabase):
             return ""
         else:
             if not count_tokens(input=str(res), agent_step="query_run"):
-                first_ten_rows = result[:10]
-                res = [
-                    tuple(truncate_word(c, length=self._max_string_length) for c in r.values())
-                    for r in first_ten_rows
-                ]
-                return f"Token overloaded.\nFirst 10 rows of data: {res}\nStored ID: {random_string}"
+                first_ten_res = res[:10]
+                return f"Token overloaded.\nFirst 10 rows of data: {first_ten_res}\nStored ID: {random_string}"
             
             return f"Data: {res}\nStored ID: {random_string}"
 
@@ -121,6 +133,7 @@ class CustomSQLDatabase(SQLDatabase):
         except SQLAlchemyError as e:
             """Format the error message"""
             return f"Error: {e}"
+
         
 
 class QuerySaveSQLDataBaseTool(QuerySQLDataBaseTool):
@@ -135,3 +148,5 @@ class QuerySaveSQLDataBaseTool(QuerySQLDataBaseTool):
     ) -> str:
         """Execute the query, return the results with stored id, or an error message."""
         return self.db.run_and_save_no_throw(query, message_id)
+    
+    

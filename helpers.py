@@ -49,20 +49,25 @@ def get_intermediate_steps_str(response):
         action_log = agent_action.log
 
         final_str += f"{action_log}\n\nObservation: {observation}\n\n"
+    if final_str == '':
+        final_str = "*Do not have intermediate steps*"
     return final_str
 
 
 def get_output_parts(response, message_id):
     final_answer = response["output"] 
     followup_questions = response["followup_questions"]
+    sql_query = response["sql_query"]
+    
+    if sql_query is not None and not sql_query.startswith("```"):
+        sql_query = f"```sql\n{sql_query}\n```"
 
     dataframe = None
-    if response['stored_id']:
-        last_stored_file = f"{response['stored_id']}.csv"
+    if response['stored_file_id']:
+        last_stored_file = f"{response['stored_file_id']}.csv"
         # deleting other tables
         message_folder_path = os.path.join("stored_data", message_id)
         if os.path.exists(message_folder_path):
-            print("exists")
             all_file_names = os.listdir(message_folder_path)
             for file_name in all_file_names:
                 if file_name != last_stored_file:
@@ -72,4 +77,4 @@ def get_output_parts(response, message_id):
             file_path = os.path.join(message_folder_path, last_stored_file)
             dataframe = pd.read_csv(file_path)
     
-    return final_answer, dataframe, followup_questions
+    return final_answer, dataframe, sql_query, followup_questions

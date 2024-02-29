@@ -6,6 +6,22 @@ from typing import List, Union
 import re, ast
 import tiktoken
 from .custom_tools import count_tokens, record_token_record
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.output_parsers import JsonOutputParser
+
+
+class FinalAnswer(BaseModel):
+    output: str = Field(description="Final answer and insights to the original input question")
+    confirmation: Union[str, None] = Field(
+        description="the confirmation to move on the next query if there is more than one query"
+    )
+    stored_file_id: str = Field(description="Stored ID of the result from sql query")
+    sql_query: str = Field(description="SQL query you generated to get the final answer")
+    followup_questions: List[str] = "Followup questions user might want to ask about the table you used"
+    choices: Union[List[str], None] = "choices that might be available for user to select"
+
+
+parser = JsonOutputParser(pydantic_object=FinalAnswer)
 
 # Set up a prompt template
 class CustomPromptTemplate(BaseChatPromptTemplate):
@@ -43,34 +59,40 @@ class CustomPromptTemplate(BaseChatPromptTemplate):
         record_token_record(reset=True)
         count_tokens(input=formatted, agent_step="Prompting")
         return [SystemMessage(content=formatted)]
+    
+    
 
 class CustomOutputParser(AgentOutputParser):
-
-    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
+    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:    
         count_tokens(input=llm_output, agent_step="final output")
-        
-        # Check if agent should finish
-            # if "Observation:" in llm_output:
-                # observation_text = llm_output.split("Observation:")[-1].strip().split("Final Answer")[0]
-        if "Final Answer: " in llm_output:    
-            final_answer_pattern = r"Final Answer: (.*?)(?:\SQL query: (.*?))?(?:\nStored ID: (.*?))?(?:\nFollowup Questions: (.*))?$"
-            
-            matches = re.search(final_answer_pattern, llm_output, re.DOTALL)
-            final_answer = matches.group(1).strip()
-            sql_query = matches.group(2).strip() if matches.group(2) else None
-            stored_id = matches.group(3).strip() if matches.group(3) else None
-            followup_questions = matches.group(4).strip() if matches.group(4) else None
-            # followup_questions = followup_questions_text.split(" || ")
-            if sql_query:
-                final_answer = f"{final_answer}\n\nSQL query I created is:\n{sql_query}"
+
+        if "Final Answer:" in llm_output:   
+            final_answer = llm_output.split("Final Answer:")[1]
+            parsed_data = parser.parse(final_answer)
+            empty_str_to_none_list = ["stored_file_id", "sql_query", "confirmation"]
+            for empty_str_field in empty_str_to_none_list:
+                if empty_str_field in parsed_data.keys():
+                    if parsed_data[empty_str_field] == "":
+                        parsed_data[empty_str_field] = None                
+                else:
+                    parsed_data[empty_str_field] = None   
+            if parsed_data["sql_query"] is not None:
+                 parsed_data["output"] = f"{parsed_data['output']}\n\nSQL query I created is: {parsed_data['sql_query']}"
+                
+            none_to_empty_list = ["followup_questions", "choices"]
+            for none_field in none_to_empty_list:
+                if none_field not in parsed_data.keys():
+                    parsed_data[none_field] = []
+            # adding confirmation to the output 
+            if "confirmation" in parsed_data.keys() and parsed_data["confirmation"] is not None:
+                parsed_data["output"] = "{}\n\n{}".format(parsed_data["output"], parsed_data["confirmation"])
+                
             return AgentFinish(
                 # Return values is generally always a dictionary with a single `output` key
                 # It is not recommended to try anything else at the moment :)
+                ## Fuck the recommendation above, bois, we ball.
                 return_values={
-                    "output": final_answer, 
-                    "sql_query" : sql_query,
-                    "stored_id": stored_id,
-                    "followup_questions" : followup_questions
+                    **parsed_data
                 },
                 log=llm_output,
             )

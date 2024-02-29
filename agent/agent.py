@@ -1,24 +1,57 @@
 from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
 from langchain.chains.llm import LLMChain
-from langchain.chat_models import AzureChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from langchain.agents.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langchain.memory import ConversationTokenBufferMemory
-from langchain.memory.chat_message_histories import StreamlitChatMessageHistory
-from langchain.agents.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+from langchain_community.chat_message_histories import StreamlitChatMessageHistory
+from langchain_openai import AzureOpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.tools.retriever import create_retriever_tool
+from .prompts import retriever_tool_description
 import os 
 import streamlit as st 
 from decouple import config
 from sqlalchemy.engine.base import Connection, Engine
 from .custom_tools import QuerySaveSQLDataBaseTool
-from .prompts import sql_helper_prompt_template, sql_db_query_description, sql_db_schema_description
+from .prompts import sql_helper_prompt_template, sql_db_query_description
 from .custom_parsers import CustomPromptTemplate, CustomOutputParser
 from .custom_tools import CustomSQLDatabase
 
 
 os.environ["OPENAI_API_TYPE"] = config("OPENAI_API_TYPE")
-os.environ["OPENAI_API_BASE"] = config("OPENAI_API_BASE")
+os.environ["AZURE_OPENAI_ENDPOINT"] = config("AZURE_OPENAI_ENDPOINT")
 os.environ["OPENAI_API_VERSION"] = config("OPENAI_API_VERSION")
-os.environ["OPENAI_API_KEY"] = config("OPENAI_API_KEY")
+os.environ["AZURE_OPENAI_API_KEY"] = config("AZURE_OPENAI_API_KEY")
+
+
+llm_embedding_model = AzureOpenAIEmbeddings(
+    deployment="text-embedding-ada-002",
+    model="text-embedding-ada-002", 
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    openai_api_version=os.environ["OPENAI_API_VERSION"],
+)
+
+thread_vector_db = FAISS.load_local("agent/faiss/thread_data", embeddings=llm_embedding_model)
+cyber_vector_db = FAISS.load_local("agent/faiss/cybersyn_data", embeddings=llm_embedding_model)
+
+
+thread_retriever = thread_vector_db.as_retriever()
+cyber_retriever = cyber_vector_db.as_retriever()
+
+
+def get_retriever_tool(db_type):
+    if db_type == "thread":
+        return create_retriever_tool(
+            thread_retriever,
+            "search_necessary_table_schemas",
+            retriever_tool_description
+        )  
+    return create_retriever_tool(
+        cyber_retriever,
+        "search_necessary_table_schemas",
+        retriever_tool_description
+    ) 
 
 
 @st.cache_resource(hash_funcs={Engine:id})
@@ -27,23 +60,26 @@ def connect_with_langchain_db(engine):
     return db
 
 
-def get_sql_tools(db, llm):
-    toolkit = SQLDatabaseToolkit(db=db, llm=llm, temperature=0)
-    query_and_save_tool = QuerySaveSQLDataBaseTool(db=db)
+def get_sql_tools(db, db_type):
+    toolkit = SQLDatabaseToolkit(db=db, llm=AzureChatOpenAI(deployment_name='gpt-4-turbo', temperature=0))
     tools = toolkit.get_tools()
+    query_and_save_tool = QuerySaveSQLDataBaseTool(db=db)
+    retriever_tool = get_retriever_tool(db_type)
     tools.append(query_and_save_tool)
+    tools.append(retriever_tool)
     tools[0].description = sql_db_query_description
-    tools[1].description = sql_db_schema_description
-    tool_names = [tool.name for tool in tools]
 
+    tools = tools[3:]
+    tool_names = [tool.name for tool in tools]
+    print(tool_names, " tool_names")
     return tools, tool_names
 
 
 def get_agent(snowflake_db):
     #creating llm 
-    llm_chat_model = AzureChatOpenAI(deployment_name="gpt-4-32k", model_name="gpt-4-32k", temperature=0)
+    llm_chat_model = AzureChatOpenAI(deployment_name="gpt-4-turbo", model_name="gpt-4-turbo", temperature=0)
 
-    tools, tool_names = get_sql_tools(db=snowflake_db, llm=llm_chat_model)
+    tools, tool_names = get_sql_tools(db=snowflake_db, db_type="thread")
     prompt = CustomPromptTemplate(
         template=sql_helper_prompt_template,
         tools=tools,
@@ -70,7 +106,7 @@ def get_agent(snowflake_db):
         max_token=6000, 
         output_key="output", 
         input_key="input",
-        return_messages=True
+        return_messages=True,
     )
 
 
@@ -79,7 +115,10 @@ def get_agent(snowflake_db):
         tools=tools, 
         verbose=True, 
         memory=memory,
-        return_intermediate_steps=True
+        return_intermediate_steps=True,
+        handle_parsing_errors=True
+        
+        
     )
     
     return agent_executor
@@ -88,6 +127,6 @@ def get_agent(snowflake_db):
 
 
 def clean_chat_memory():
-    # message_history = StreamlitChatMessageHistory()
-    # message_history.clear()
+    message_history = StreamlitChatMessageHistory()
+    message_history.clear()
     st.session_state.chat_memory = []
